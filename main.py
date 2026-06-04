@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BenderSites — Auto Deploy (Railway)
-Pollt Trello, lädt Demos von R2, deployed zu Cloudflare Pages via Wrangler.
+Pollt ALLE Trello-Boards, lädt Demos von R2, deployed zu Cloudflare Pages via Wrangler.
 """
 
 import os
@@ -17,7 +17,6 @@ from pathlib import Path
 
 TRELLO_KEY    = os.environ.get("TRELLO_KEY")
 TRELLO_TOKEN  = os.environ.get("TRELLO_TOKEN")
-TRELLO_BOARD  = os.environ.get("TRELLO_BOARD", "Chantal - Berlin")
 INTEREST_LIST = os.environ.get("INTEREST_LIST", "Interesse")
 MEMBER_ID     = "62567bb5a14d9d77d738eb88"
 
@@ -31,7 +30,7 @@ R2_BUCKET     = os.environ.get("R2_BUCKET", "bendersites-demos")
 
 POLL_INTERVAL = 60
 TRELLO_BASE   = "https://api.trello.com/1"
-processed     = set()
+processed     = set()   # speichert (board_id, card_id)
 
 # ── Trello ────────────────────────────────────────────────────
 
@@ -151,7 +150,7 @@ def wrangler_deploy(project_name, folder_path, env):
 
 # ── Hauptlogik ────────────────────────────────────────────────
 
-def process_card(card, env, label_id):
+def process_card(card, board_id, env, label_id):
     card_id = card["id"]
     name = card["name"]
     print(f"\n[DEPLOY] {name}")
@@ -191,6 +190,37 @@ def process_card(card, env, label_id):
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
+def scan_board(board, env):
+    board_id = board["id"]
+    board_name = board["name"]
+    print(f"\n📋 Board: {board_name}")
+
+    label_id = get_label_id(board_id)
+    if label_id:
+        print(f"  ✓ Label 'Demo online' gefunden")
+    else:
+        print(f"  ⚠ Label 'Demo online' nicht gefunden")
+
+    try:
+        lists = trello_get(f"/boards/{board_id}/lists", fields="name,id")
+        lst = next((l for l in lists if l["name"].lower() == INTEREST_LIST.lower()), None)
+        if not lst:
+            print(f"  ⚠ Liste '{INTEREST_LIST}' nicht gefunden")
+            return
+
+        cards = trello_get(f"/lists/{lst['id']}/cards", fields="id,name")
+        new_cards = [c for c in cards if (board_id, c["id"]) not in processed]
+
+        if new_cards:
+            for card in new_cards:
+                process_card(card, board_id, env, label_id)
+                processed.add((board_id, card["id"]))
+        else:
+            print(f"  → Keine neuen Karten")
+
+    except Exception as e:
+        print(f"  ✗ Fehler: {e}")
+
 def main():
     print("BenderSites Deploy (Railway) — startet...")
 
@@ -206,39 +236,23 @@ def main():
 
     try:
         boards = trello_get("/members/me/boards", fields="name,id")
-        board = next((b for b in boards if b["name"].lower() == TRELLO_BOARD.lower()), None)
-        if not board:
-            raise Exception(f"Board '{TRELLO_BOARD}' nicht gefunden. Verfügbar: {[b['name'] for b in boards]}")
-        board_id = board["id"]
-        print(f"✓ Board: {board['name']}")
+        print(f"✓ {len(boards)} Board(s) gefunden: {', '.join(b['name'] for b in boards)}")
     except Exception as e:
-        print(f"✗ {e}")
+        print(f"✗ Board-Liste konnte nicht geladen werden: {e}")
         sys.exit(1)
 
-    label_id = get_label_id(board_id)
-    if label_id:
-        print(f"✓ Label 'Demo online' gefunden")
-    else:
-        print(f"⚠ Label 'Demo online' nicht gefunden — wird übersprungen")
-
-    print(f"✓ Polling alle {POLL_INTERVAL}s auf '{INTEREST_LIST}'\n")
+    print(f"✓ Polling alle {POLL_INTERVAL}s auf Liste '{INTEREST_LIST}'\n")
 
     while True:
         try:
-            lists = trello_get(f"/boards/{board_id}/lists", fields="name,id")
-            lst = next((l for l in lists if l["name"].lower() == INTEREST_LIST.lower()), None)
-            if not lst:
-                raise Exception(f"Liste '{INTEREST_LIST}' nicht gefunden")
+            boards = trello_get("/members/me/boards", fields="name,id")
+            for board in boards:
+                scan_board(board, env)
 
-            cards = trello_get(f"/lists/{lst['id']}/cards", fields="id,name")
-            new_cards = [c for c in cards if c["id"] not in processed]
+            if not any((b["id"], c["id"]) not in processed for b in boards for c in []):
+                pass
 
-            if new_cards:
-                for card in new_cards:
-                    process_card(card, env, label_id)
-                    processed.add(card["id"])
-            else:
-                print(f"[{time.strftime('%H:%M:%S')}] Keine neuen Karten — nächste Prüfung in {POLL_INTERVAL}s")
+            print(f"[{time.strftime('%H:%M:%S')}] Nächste Prüfung in {POLL_INTERVAL}s")
 
         except Exception as e:
             print(f"✗ Fehler: {e}")
