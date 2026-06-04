@@ -17,6 +17,7 @@ from pathlib import Path
 
 TRELLO_KEY    = os.environ.get("TRELLO_KEY")
 TRELLO_TOKEN  = os.environ.get("TRELLO_TOKEN")
+TRELLO_BOARD  = os.environ.get("TRELLO_BOARD", "Chantal - Berlin")
 INTEREST_LIST = os.environ.get("INTEREST_LIST", "Interesse")
 MEMBER_ID     = "62567bb5a14d9d77d738eb88"
 
@@ -205,8 +206,10 @@ def main():
 
     try:
         boards = trello_get("/members/me/boards", fields="name,id")
-
-print(f"✓ {len(boards)} Boards gefunden")
+        board = next((b for b in boards if b["name"].lower() == TRELLO_BOARD.lower()), None)
+        if not board:
+            raise Exception(f"Board '{TRELLO_BOARD}' nicht gefunden. Verfügbar: {[b['name'] for b in boards]}")
+        board_id = board["id"]
         print(f"✓ Board: {board['name']}")
     except Exception as e:
         print(f"✗ {e}")
@@ -222,40 +225,12 @@ print(f"✓ {len(boards)} Boards gefunden")
 
     while True:
         try:
-            for board in boards:
+            lists = trello_get(f"/boards/{board_id}/lists", fields="name,id")
+            lst = next((l for l in lists if l["name"].lower() == INTEREST_LIST.lower()), None)
+            if not lst:
+                raise Exception(f"Liste '{INTEREST_LIST}' nicht gefunden")
 
-    lists = trello_get(
-        f"/boards/{board['id']}/lists",
-        fields="name,id"
-    )
-
-    interest_lists = [
-        l for l in lists
-        if l["name"].lower() == INTEREST_LIST.lower()
-    ]
-
-    for lst in interest_lists:
-
-        cards = trello_get(
-            f"/lists/{lst['id']}/cards",
-            fields="id,name,idLabels"
-        )
-        already_done = any(
-    label["name"].lower() == "demo online"
-    for label in card.get("labels", [])
-)
-
-if already_done:
-    continue
-
-        new_cards = [
-            c for c in cards
-            if c["id"] not in processed
-        ]
-
-        for card in new_cards:
-            process_card(card, env, label_id)
-            processed.add(card["id"])
+            cards = trello_get(f"/lists/{lst['id']}/cards", fields="id,name")
             new_cards = [c for c in cards if c["id"] not in processed]
 
             if new_cards:
