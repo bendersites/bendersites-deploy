@@ -15,17 +15,17 @@ import requests
 import boto3
 from pathlib import Path
 
-TRELLO_KEY    = os.environ.get("TRELLO_KEY")
-TRELLO_TOKEN  = os.environ.get("TRELLO_TOKEN")
+TRELLO_KEY    = os.environ.get("TRELLO_KEY", "")
+TRELLO_TOKEN  = os.environ.get("TRELLO_TOKEN", "")
 INTEREST_LIST = os.environ.get("INTEREST_LIST", "Interesse")
 MEMBER_ID     = "62567bb5a14d9d77d738eb88"
 
-CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID")
-CF_API_TOKEN  = os.environ.get("CF_API_TOKEN")
+CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID", "")
+CF_API_TOKEN  = os.environ.get("CF_API_TOKEN", "")
 
-R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
-R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY")
-R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY")
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "")
+R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY", "")
+R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY", "")
 R2_BUCKET     = os.environ.get("R2_BUCKET", "bendersites-demos")
 
 POLL_INTERVAL = 60
@@ -36,39 +36,52 @@ processed     = set()   # speichert (board_id, card_id)
 
 def trello_get(path, **params):
     params.update(key=TRELLO_KEY, token=TRELLO_TOKEN)
-    r = requests.get(f"{TRELLO_BASE}{path}", params=params)
+    url = f"{TRELLO_BASE}{path}"
+    print(f"  → GET {url} | key={'*' if TRELLO_KEY else 'FEHLT'} token={'*' if TRELLO_TOKEN else 'FEHLT'}")
+    r = requests.get(url, params=params, timeout=30)
+    print(f"  ← Status: {r.status_code}")
+    if r.status_code != 200:
+        print(f"  ← Body: {r.text[:200]}")
     r.raise_for_status()
     return r.json()
 
 def trello_post(path, **data):
     data.update(key=TRELLO_KEY, token=TRELLO_TOKEN)
-    r = requests.post(f"{TRELLO_BASE}{path}", json=data)
+    r = requests.post(f"{TRELLO_BASE}{path}", json=data, timeout=30)
     r.raise_for_status()
     return r.json()
 
 def add_comment(card_id, text):
-    trello_post(f"/cards/{card_id}/actions/comments", text=text)
+    try:
+        trello_post(f"/cards/{card_id}/actions/comments", text=text)
+    except Exception as e:
+        print(f"  ⚠ Kommentar fehlgeschlagen: {e}")
 
 def add_member(card_id):
     try:
         requests.post(
             f"{TRELLO_BASE}/cards/{card_id}/idMembers",
-            json={"key": TRELLO_KEY, "token": TRELLO_TOKEN, "value": MEMBER_ID}
+            json={"key": TRELLO_KEY, "token": TRELLO_TOKEN, "value": MEMBER_ID},
+            timeout=10
         )
         print(f"  ✓ Member hinzugefügt")
     except Exception as e:
         print(f"  ⚠ Member: {e}")
 
 def get_label_id(board_id, label_name="Demo online"):
-    labels = trello_get(f"/boards/{board_id}/labels")
-    label = next((l for l in labels if l["name"].lower() == label_name.lower()), None)
-    return label["id"] if label else None
+    try:
+        labels = trello_get(f"/boards/{board_id}/labels")
+        label = next((l for l in labels if l["name"].lower() == label_name.lower()), None)
+        return label["id"] if label else None
+    except Exception:
+        return None
 
 def add_label(card_id, label_id):
     try:
         requests.post(
             f"{TRELLO_BASE}/cards/{card_id}/idLabels",
-            json={"key": TRELLO_KEY, "token": TRELLO_TOKEN, "value": label_id}
+            json={"key": TRELLO_KEY, "token": TRELLO_TOKEN, "value": label_id},
+            timeout=10
         )
         print(f"  ✓ Label 'Demo online' gesetzt")
     except Exception as e:
@@ -222,26 +235,42 @@ def scan_board(board, env):
         print(f"  ✗ Fehler: {e}")
 
 def main():
+    print("=" * 50)
     print("BenderSites Deploy (Railway) — startet...")
+    print("=" * 50)
+
+    # Debug: Zeige welche Env-Variablen gesetzt sind (ohne Werte)
+    print("\n[ENV CHECK]")
+    for key in ["TRELLO_KEY", "TRELLO_TOKEN", "TRELLO_BOARD", "INTEREST_LIST",
+                "CF_ACCOUNT_ID", "CF_API_TOKEN", "R2_ACCOUNT_ID", "R2_ACCESS_KEY",
+                "R2_SECRET_KEY", "R2_BUCKET"]:
+        val = os.environ.get(key, "")
+        status = "✓" if val else "✗ FEHLEND"
+        print(f"  {status} {key}")
 
     result = subprocess.run(["wrangler", "--version"], capture_output=True, text=True)
     if result.returncode != 0:
         print("✗ Wrangler nicht gefunden")
         sys.exit(1)
-    print(f"✓ {result.stdout.strip()}")
+    print(f"\n✓ Wrangler {result.stdout.strip()}")
 
     env = os.environ.copy()
     env["CLOUDFLARE_ACCOUNT_ID"] = CF_ACCOUNT_ID
     env["CLOUDFLARE_API_TOKEN"]  = CF_API_TOKEN
 
-    try:
-        boards = trello_get("/members/me/boards", fields="name,id")
-        print(f"✓ {len(boards)} Board(s) gefunden: {', '.join(b['name'] for b in boards)}")
-    except Exception as e:
-        print(f"✗ Board-Liste konnte nicht geladen werden: {e}")
-        sys.exit(1)
+    # Trello-Check mit Retry statt Crash
+    while True:
+        try:
+            boards = trello_get("/members/me/boards", fields="name,id")
+            print(f"\n✓ {len(boards)} Board(s) gefunden: {', '.join(b['name'] for b in boards)}")
+            break
+        except Exception as e:
+            print(f"\n✗ Trello-Fehler: {e}")
+            print(f"  → Warte 30s und versuche erneut...")
+            time.sleep(30)
 
-    print(f"✓ Polling alle {POLL_INTERVAL}s auf Liste '{INTEREST_LIST}'\n")
+    print(f"\n✓ Polling alle {POLL_INTERVAL}s auf Liste '{INTEREST_LIST}'")
+    print("=" * 50)
 
     while True:
         try:
@@ -249,13 +278,12 @@ def main():
             for board in boards:
                 scan_board(board, env)
 
-            if not any((b["id"], c["id"]) not in processed for b in boards for c in []):
-                pass
-
-            print(f"[{time.strftime('%H:%M:%S')}] Nächste Prüfung in {POLL_INTERVAL}s")
+            print(f"\n[{time.strftime('%H:%M:%S')}] Nächste Prüfung in {POLL_INTERVAL}s")
+            print("-" * 40)
 
         except Exception as e:
-            print(f"✗ Fehler: {e}")
+            print(f"\n✗ Fehler im Main-Loop: {e}")
+            print(f"  → Warte {POLL_INTERVAL}s...")
 
         time.sleep(POLL_INTERVAL)
 
